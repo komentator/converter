@@ -299,15 +299,35 @@ def build_frame(dst_mac, src_mac, appid, vlan_id, vlan_pcp, simulation, savpdu):
 PCAP_GLOBAL_HEADER = struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
 
 
-def write_pcap_bytes(frames, sample_interval_us):
+def write_pcap_bytes(frames, sample_interval_us, timestamps=None):
+    """
+    Записывает фреймы в PCAP формат.
+
+    Args:
+        frames: список фреймов
+        sample_interval_us: интервал между сэмплами в микросекундах
+        timestamps: опциональный список временных меток для каждого фрейма (в микросекундах)
+                   Если None, используется линейное увеличение с шагом sample_interval_us
+    """
     out = bytearray(PCAP_GLOBAL_HEADER)
-    t_us = 0
-    for fr in frames:
-        ts_sec = t_us // 1_000_000
-        ts_usec = t_us % 1_000_000
-        out += struct.pack('<IIII', ts_sec, ts_usec, len(fr), len(fr))
-        out += fr
-        t_us += sample_interval_us
+
+    if timestamps is None:
+        # Стандартное поведение: линейное увеличение времени
+        t_us = 0
+        for fr in frames:
+            ts_sec = t_us // 1_000_000
+            ts_usec = t_us % 1_000_000
+            out += struct.pack('<IIII', ts_sec, ts_usec, len(fr), len(fr))
+            out += fr
+            t_us += sample_interval_us
+    else:
+        # Используем предоставленные временные метки
+        for fr, t_us in zip(frames, timestamps):
+            ts_sec = t_us // 1_000_000
+            ts_usec = t_us % 1_000_000
+            out += struct.pack('<IIII', ts_sec, ts_usec, len(fr), len(fr))
+            out += fr
+
     return bytes(out)
 
 
@@ -386,4 +406,118 @@ def convert(cfg_text, dat_text, mapping, params):
         frames.append(frame)
 
     pcap_bytes = write_pcap_bytes(frames, interval_us)
+    return pcap_bytes, len(frames)
+
+
+def convert_dual(cfg_text, dat_text, mapping1, mapping2, params1, params2, smp_cnt_start=0):
+    """
+    Конвертирует осциллограмму в ДВА чередующихся SV потока в одном PCAP файле.
+
+    Паттерн чередования:
+    - Фрейм 1: SV1, smpCnt=N, время=T
+    - Фрейм 2: SV2, smpCnt=N, время=T+1µs
+    - Фрейм 3: SV1, smpCnt=N+1, время=T+interval
+    - Фрейм 4: SV2, smpCnt=N+1, время=T+interval+1µs
+
+    Args:
+        cfg_text: текст .cfg файла
+        dat_text: текст .dat файла
+        mapping1: маппинг каналов для первого потока { 'Ia': ch_idx, ... }
+        mapping2: маппинг каналов для второго потока { 'Ia': ch_idx, ... }
+        params1: параметры первого потока (mac, appid, svid, ktt, ktn, k3i0, k3u0 и т.д.)
+        params2: параметры второго потока (mac, appid, svid, ktt, ktn, k3i0, k3u0 и т.д.)
+        smp_cnt_start: начальное значение smpCnt (по умолчанию 0)
+
+    Returns:
+        (pcap_bytes, frames_count)
+    """
+    cfg = parse_cfg(cfg_text)
+    channels = cfg['channels']
+    n_channels = len(channels)
+    rows = parse_dat_ascii(dat_text, n_channels)
+    sample_rate = cfg['sample_rate']
+    interval_us = int(round(1_000_000 / sample_rate))
+
+    # Валидация маппингов
+    for role in ROLE_ORDER:
+        if mapping1.get(role) is None:
+            raise ValueError(f'Поток 1: не назначен канал для роли {role}')
+        if mapping2.get(role) is None:
+            raise ValueError(f'Поток 2: не назначен канал для роли {role}')
+
+    # Парсим параметры потока 1
+    dst_mac1 = mac_to_bytes(params1['mac'])
+    src_mac1 = mac_to_bytes(params1.get('src_mac') or DEFAULT_SRC_MAC)
+    appid1 = int(params1['appid'], 16) if isinstance(params1['appid'], str) else int(params1['appid'])
+    vlanid_raw1 = params1.get('vlanid', 0)
+    vlan_id1 = int(vlanid_raw1, 16) if isinstance(vlanid_raw1, str) and vlanid_raw1 != '' else int(vlanid_raw1 or 0)
+    vlan_pcp1 = int(params1.get('vlan_pcp', 4))
+    svid1 = params1['svid']
+    conf_rev1 = int(params1['confrev'])
+    simulation1 = bool(params1['simulation'])
+    ktt1 = float(params1['ktt'])
+    ktn1 = float(params1['ktn'])
+    k3i0_1 = float(params1['k3i0'])
+    k3u0_1 = float(params1['k3u0'])
+
+    # Парсим параметры потока 2
+    dst_mac2 = mac_to_bytes(params2['mac'])
+    src_mac2 = mac_to_bytes(params2.get('src_mac') or DEFAULT_SRC_MAC)
+    appid2 = int(params2['appid'], 16) if isinstance(params2['appid'], str) else int(params2['appid'])
+    vlanid_raw2 = params2.get('vlanid', 0)
+    vlan_id2 = int(vlanid_raw2, 16) if isinstance(vlanid_raw2, str) and vlanid_raw2 != '' else int(vlanid_raw2 or 0)
+    vlan_pcp2 = int(params2.get('vlan_pcp', 4))
+    svid2 = params2['svid']
+    conf_rev2 = int(params2['confrev'])
+    simulation2 = bool(params2['simulation'])
+    ktt2 = float(params2['ktt'])
+    ktn2 = float(params2['ktn'])
+    k3i0_2 = float(params2['k3i0'])
+    k3u0_2 = float(params2['k3u0'])
+
+    smp_cnt_period = max(int(round(sample_rate)), 1)
+
+    frames = []
+
+    for i, row in enumerate(rows):
+        smp_cnt = (smp_cnt_start + i) % smp_cnt_period
+
+        # Фрейм 1: SV1
+        values1 = {}
+        for role in ROLE_ORDER:
+            ch_idx = mapping1[role]
+            ch = channels[ch_idx]
+            raw = row[ch_idx]
+            secondary = float(raw) * float(ch.get('mult', 1.0)) + float(ch.get('offset', 0.0))
+            values1[role] = secondary
+
+        sample_bytes1 = build_sample_bytes(values1, ktt1, ktn1, k3i0_1, k3u0_1)
+        asdu1 = build_asdu(svid1, smp_cnt, conf_rev1, sample_bytes1, smp_synch=0)
+        savpdu1 = build_savpdu([asdu1])
+        frame1 = build_frame(dst_mac1, src_mac1, appid1, vlan_id1, vlan_pcp1, simulation1, savpdu1)
+        frames.append(frame1)
+
+        # Фрейм 2: SV2 (с тем же smp_cnt!)
+        values2 = {}
+        for role in ROLE_ORDER:
+            ch_idx = mapping2[role]
+            ch = channels[ch_idx]
+            raw = row[ch_idx]
+            secondary = float(raw) * float(ch.get('mult', 1.0)) + float(ch.get('offset', 0.0))
+            values2[role] = secondary
+
+        sample_bytes2 = build_sample_bytes(values2, ktt2, ktn2, k3i0_2, k3u0_2)
+        asdu2 = build_asdu(svid2, smp_cnt, conf_rev2, sample_bytes2, smp_synch=0)
+        savpdu2 = build_savpdu([asdu2])
+        frame2 = build_frame(dst_mac2, src_mac2, appid2, vlan_id2, vlan_pcp2, simulation2, savpdu2)
+        frames.append(frame2)
+
+    # Генерируем временные метки: оба фрейма в паре имеют почти одинаковое время
+    timestamps = []
+    for i in range(len(rows)):
+        t_us = i * interval_us
+        timestamps.append(t_us)        # SV1 в момент T
+        timestamps.append(t_us + 1)    # SV2 через 1 микросекунду
+
+    pcap_bytes = write_pcap_bytes(frames, interval_us, timestamps)
     return pcap_bytes, len(frames)
