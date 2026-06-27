@@ -335,12 +335,24 @@ def write_pcap_bytes(frames, sample_interval_us, timestamps=None):
 # Полный конвейер
 # --------------------------------------------------------------------------
 
-def convert(cfg_text, dat_text, mapping, params):
+def convert(cfg_text, dat_text, mapping, params, mapping2=None, params2=None):
     """
-    mapping: { 'Ia': ch_index0based, 'Ib': ..., ... } - какой канал .dat/.cfg
-             соответствует какой роли в потоке SV.
-    params: словарь со всеми параметрами потока (см. ниже ключи).
-    Возвращает (pcap_bytes, frames_count)
+    Конвертер осциллограммы COMTRADE в SV поток(и).
+
+    Поддерживает два режима:
+    - Single stream: mapping2=None, params2=None → один SV поток
+    - Dual stream: mapping2 и params2 заполнены → два независимых SV потока
+
+    Args:
+        cfg_text: Содержимое .cfg файла
+        dat_text: Содержимое .dat файла
+        mapping: { 'Ia': ch_index, 'Ib': ..., ... } для потока 1
+        params: Параметры потока 1 (mac, appid, svid, ktt, ktn, k3i0, k3u0, ...)
+        mapping2: Сопоставление каналов для потока 2 (опционально)
+        params2: Параметры потока 2 (опционально)
+
+    Returns:
+        (pcap_bytes, frames_count) - бинарный PCAP с фреймами, количество фреймов
     """
     cfg = parse_cfg(cfg_text)
     channels = cfg['channels']
@@ -349,10 +361,22 @@ def convert(cfg_text, dat_text, mapping, params):
     sample_rate = cfg['sample_rate']
     interval_us = int(round(1_000_000 / sample_rate))
 
+    # Валидация Stream 1
     for role in ROLE_ORDER:
         if mapping.get(role) is None:
             raise ValueError(f'Не назначен канал для роли {role}')
 
+    # Валидация Stream 2 (если включен)
+    if mapping2 is not None or params2 is not None:
+        if mapping2 is None or params2 is None:
+            raise ValueError('Если включен режим двух потоков, нужны оба: mapping2 и params2')
+        for role in ROLE_ORDER:
+            if mapping2.get(role) is None:
+                raise ValueError(f'Не назначен канал для роли {role} в Stream 2')
+
+    dual_mode = mapping2 is not None and params2 is not None
+
+    # Stream 1 параметры
     dst_mac = mac_to_bytes(params['mac'])
     src_mac = mac_to_bytes(params.get('src_mac') or DEFAULT_SRC_MAC)
 
@@ -372,11 +396,35 @@ def convert(cfg_text, dat_text, mapping, params):
     k3i0 = float(params['k3i0'])
     k3u0 = float(params['k3u0'])
 
+    # Stream 2 параметры (если включен)
+    if dual_mode:
+        dst_mac2 = mac_to_bytes(params2['mac'])
+        src_mac2 = mac_to_bytes(params2.get('src_mac') or DEFAULT_SRC_MAC)
+
+        appid_raw2 = params2['appid']
+        appid2 = int(appid_raw2, 16) if isinstance(appid_raw2, str) else int(appid_raw2)
+
+        vlanid_raw2 = params2.get('vlanid', 0)
+        vlan_id2 = int(vlanid_raw2, 16) if isinstance(vlanid_raw2, str) and vlanid_raw2 != '' else int(vlanid_raw2 or 0)
+        vlan_pcp2 = int(params2.get('vlan_pcp', 4))
+
+        svid2 = params2['svid']
+        conf_rev2 = int(params2['confrev'])
+        simulation2 = bool(params2['simulation'])
+
+        ktt2 = float(params2['ktt'])
+        ktn2 = float(params2['ktn'])
+        k3i0_2 = float(params2['k3i0'])
+        k3u0_2 = float(params2['k3u0'])
+
     smp_cnt_period = max(int(round(sample_rate)), 1)
 
     frames = []
     debug_count = 0
     for i, row in enumerate(rows):
+        smp_cnt = i % smp_cnt_period
+
+        # Stream 1 - всегда генерируется
         values_by_role = {}
         for role in ROLE_ORDER:
             ch_idx = mapping[role]
@@ -384,11 +432,9 @@ def convert(cfg_text, dat_text, mapping, params):
                 raise ValueError(f"Канал для {role} не определён!")
             ch = channels[ch_idx]
             raw = row[ch_idx]
-            # Применяем множитель и смещение из конфига
             secondary = float(raw) * float(ch.get('mult', 1.0)) + float(ch.get('offset', 0.0))
             values_by_role[role] = secondary
-            
-            # Логируем первые несколько значений для отладки
+
             if i < 2 and debug_count < 16:
                 ratio = ktt if ROLE_IS_CURRENT[role] else (ktn if role[0].upper() in 'U' else ktn)
                 if role in ['In', 'Un']:
@@ -397,13 +443,31 @@ def convert(cfg_text, dat_text, mapping, params):
                 scale = SCALE_CURRENT if ROLE_IS_CURRENT[role] else SCALE_VOLTAGE
                 ival = int(round(primary * scale))
                 debug_count += 1
-        
+
         sample_bytes = build_sample_bytes(values_by_role, ktt, ktn, k3i0, k3u0)
-        smp_cnt = i % smp_cnt_period
         asdu = build_asdu(svid, smp_cnt, conf_rev, sample_bytes, smp_synch=0)
         savpdu = build_savpdu([asdu])
         frame = build_frame(dst_mac, src_mac, appid, vlan_id, vlan_pcp, simulation, savpdu)
         frames.append(frame)
+
+        # Stream 2 - если включен dual mode
+        if dual_mode:
+            values_by_role2 = {}
+            for role in ROLE_ORDER:
+                ch_idx2 = mapping2[role]
+                if ch_idx2 is None:
+                    raise ValueError(f"Канал для {role} не определён в Stream 2!")
+                ch = channels[ch_idx2]
+                raw = row[ch_idx2]
+                secondary2 = float(raw) * float(ch.get('mult', 1.0)) + float(ch.get('offset', 0.0))
+                values_by_role2[role] = secondary2
+
+            sample_bytes2 = build_sample_bytes(values_by_role2, ktt2, ktn2, k3i0_2, k3u0_2)
+            # Используем ТОТЖЕ smp_cnt для обоих потоков одного момента времени
+            asdu2 = build_asdu(svid2, smp_cnt, conf_rev2, sample_bytes2, smp_synch=0)
+            savpdu2 = build_savpdu([asdu2])
+            frame2 = build_frame(dst_mac2, src_mac2, appid2, vlan_id2, vlan_pcp2, simulation2, savpdu2)
+            frames.append(frame2)
 
     pcap_bytes = write_pcap_bytes(frames, interval_us)
     return pcap_bytes, len(frames)

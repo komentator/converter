@@ -43,6 +43,8 @@ class SVConverterGUI:
         self.dat_file = None
         self.channels = []
         self.mapping = {role: None for role in ROLE_ORDER}
+        self.mapping2 = {role: None for role in ROLE_ORDER}  # Для второго потока
+        self.dual_stream_mode = tk.BooleanVar(value=False)  # Флаг режима двух потоков
         self.pcap_data = None
         self.parsed_samples = None  # Данные для просмотра
         self.notebook = None  # Ссылка на Notebook для переключения вкладок
@@ -132,101 +134,261 @@ class SVConverterGUI:
         
     def create_mapping_tab(self, parent):
         """Вкладка сопоставления каналов"""
-        
+
         mainframe = ttk.Frame(parent, padding="20")
         mainframe.pack(fill=tk.BOTH, expand=True)
-        
+
         ttk.Label(mainframe, text="Сопоставление параметров SV с каналами:", font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=(0, 20))
-        
+
+        # Переключатель между потоками (видно только в режиме двух потоков)
+        self.stream_selector_frame = ttk.Frame(mainframe)
+        self.stream_selector_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(self.stream_selector_frame, text="Выбрать поток:").pack(side=tk.LEFT, padx=(0, 10))
+        self.stream_var = tk.StringVar(value="stream1")
+        ttk.Radiobutton(self.stream_selector_frame, text="SV Stream 1", variable=self.stream_var,
+                        value="stream1", command=self.on_stream_selection_changed).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Radiobutton(self.stream_selector_frame, text="SV Stream 2", variable=self.stream_var,
+                        value="stream2", command=self.on_stream_selection_changed).pack(side=tk.LEFT)
+
+        self.stream_selector_frame.pack_forget()  # Скрываем до включения режима двух потоков
+
         # Таблица
         columns = ("Параметр", "Канал", "Тип")
         self.mapping_tree = ttk.Treeview(mainframe, columns=columns, height=12, show="headings")
-        
+
         self.mapping_tree.column("Параметр", width=150)
         self.mapping_tree.column("Канал", width=400)
         self.mapping_tree.column("Тип", width=200)
-        
+
         self.mapping_tree.heading("Параметр", text="Параметр")
         self.mapping_tree.heading("Канал", text="Выбранный канал")
         self.mapping_tree.heading("Тип", text="Тип (ток/напряжение)")
-        
+
         self.mapping_tree.pack(fill=tk.BOTH, expand=True, pady=(0, 20))
-        
+
         # Кнопки
         btn_frame = ttk.Frame(mainframe)
         btn_frame.pack(fill=tk.X)
-        
+
         ttk.Button(btn_frame, text="🔍 Автоматическое определение", command=self.auto_detect).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(btn_frame, text="✎ Редактировать выбранный", command=self.edit_mapping).pack(side=tk.LEFT)
+
+    def on_stream_selection_changed(self):
+        """Переключение между потоками в Tab 2"""
+        self.update_mapping_table()
         
+    def auto_fill_stream2_params(self):
+        """Автоматически заполняет параметры Stream 2 на основе Stream 1"""
+        try:
+            # MAC: последний октет +1
+            mac = self.params['mac'].get()
+            mac_parts = mac.split('-')
+            if len(mac_parts) == 6:
+                last_octet = int(mac_parts[-1], 16)
+                mac_parts[-1] = f"{last_octet + 1:02X}"
+                new_mac = '-'.join(mac_parts)
+            else:
+                new_mac = mac
+
+            # APPID: текущее значение +1
+            appid_str = self.params['appid'].get()
+            appid = int(appid_str, 16)
+            new_appid = f"{appid + 1:04X}"
+
+            # SVID: _SV1 → _SV2
+            svid = self.params['svid'].get()
+            new_svid = svid.replace('_SV1', '_SV2').replace('SV1', 'SV2')
+
+            # Заполняем поля Stream 2
+            self.params2['mac'].delete(0, tk.END)
+            self.params2['mac'].insert(0, new_mac)
+
+            self.params2['appid'].delete(0, tk.END)
+            self.params2['appid'].insert(0, new_appid)
+
+            self.params2['svid'].delete(0, tk.END)
+            self.params2['svid'].insert(0, new_svid)
+
+            messagebox.showinfo("Успех", "Параметры Stream 2 автоматически заполнены")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Ошибка при заполнении:\n{str(e)}")
+
+    def copy_coefficients_to_stream2(self):
+        """Копирует коэффициенты из Stream 1 в Stream 2"""
+        try:
+            for key in ['ktt', 'ktn', 'k3i0', 'k3u0']:
+                value = self.params[key].get()
+                self.params2[key].delete(0, tk.END)
+                self.params2[key].insert(0, value)
+            messagebox.showinfo("Успех", "Коэффициенты скопированы в Stream 2")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Ошибка при копировании:\n{str(e)}")
     def create_params_tab(self, parent):
         """Вкладка параметров SV"""
-        
+
         mainframe = ttk.Frame(parent, padding="20")
         mainframe.pack(fill=tk.BOTH, expand=True)
-        
-        # Сетевые параметры
-        ttk.Label(mainframe, text="Сетевые параметры:", font=("Arial", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
-        
-        net_frame = ttk.Frame(mainframe)
-        net_frame.pack(fill=tk.X, pady=(0, 20))
-        
+
+        # Checkbox для режима двух потоков
+        self.dual_stream_check = ttk.Checkbutton(mainframe, text="🔀 Режим двух SV потоков (Dual Stream Mode)",
+                                                   variable=self.dual_stream_mode, command=self.on_dual_stream_toggled)
+        self.dual_stream_check.pack(anchor=tk.W, pady=(0, 20))
+
+        # Основной Canvas + Scrollbar для прокрутки
+        canvas = tk.Canvas(mainframe, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(mainframe, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # ===== STREAM 1 =====
+        self.stream1_frame = ttk.LabelFrame(scrollable_frame, text="Stream 1 - Параметры", padding="15")
+        self.stream1_frame.pack(fill=tk.X, pady=(0, 20), padx=5)
+
+        # Сетевые параметры Stream 1
+        ttk.Label(self.stream1_frame, text="Сетевые параметры:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 10))
+
+        net_frame1 = ttk.Frame(self.stream1_frame)
+        net_frame1.pack(fill=tk.X, pady=(0, 15))
+
         self.params = {}
-        
+
         params_list = [
             ("MAC адрес", "mac", "01-0C-CD-04-00-01"),
             ("APPID (hex)", "appid", "4000"),
             ("VLANID (hex)", "vlanid", "0"),
             ("VLAN Priority", "vlan_pcp", "4"),
         ]
-        
+
         for i, (label, key, default) in enumerate(params_list):
-            ttk.Label(net_frame, text=label + ":").grid(row=i, column=0, sticky=tk.W, padx=(0, 10), pady=5)
-            self.params[key] = ttk.Entry(net_frame, width=30)
+            ttk.Label(net_frame1, text=label + ":").grid(row=i, column=0, sticky=tk.W, padx=(0, 10), pady=5)
+            self.params[key] = ttk.Entry(net_frame1, width=30)
             self.params[key].insert(0, default)
             self.params[key].grid(row=i, column=1, sticky=tk.W, padx=(0, 20), pady=5)
-        
-        # ASDU параметры
-        ttk.Label(mainframe, text="ASDU параметры:", font=("Arial", 11, "bold")).pack(anchor=tk.W, pady=(20, 10))
-        
-        asdu_frame = ttk.Frame(mainframe)
-        asdu_frame.pack(fill=tk.X, pady=(0, 20))
-        
+
+        # ASDU параметры Stream 1
+        ttk.Label(self.stream1_frame, text="ASDU параметры:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(10, 10))
+
+        asdu_frame1 = ttk.Frame(self.stream1_frame)
+        asdu_frame1.pack(fill=tk.X, pady=(0, 15))
+
         asdu_params = [
             ("svID", "svid", "RET61850_SV1"),
             ("confRev", "confrev", "1"),
         ]
-        
+
         for i, (label, key, default) in enumerate(asdu_params):
-            ttk.Label(asdu_frame, text=label + ":").grid(row=i, column=0, sticky=tk.W, padx=(0, 10), pady=5)
-            self.params[key] = ttk.Entry(asdu_frame, width=30)
+            ttk.Label(asdu_frame1, text=label + ":").grid(row=i, column=0, sticky=tk.W, padx=(0, 10), pady=5)
+            self.params[key] = ttk.Entry(asdu_frame1, width=30)
             self.params[key].insert(0, default)
             self.params[key].grid(row=i, column=1, sticky=tk.W, padx=(0, 20), pady=5)
-        
-        # Флаг Simulation
+
+        # Флаг Simulation Stream 1
         self.params["simulation"] = tk.BooleanVar(value=True)
-        ttk.Checkbutton(asdu_frame, text="Флаг Simulation/Test", variable=self.params["simulation"]).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=10)
-        
-        # Коэффициенты
-        ttk.Label(mainframe, text="Коэффициенты трансформации:", font=("Arial", 11, "bold")).pack(anchor=tk.W, pady=(20, 10))
-        
-        coef_frame = ttk.Frame(mainframe)
-        coef_frame.pack(fill=tk.X)
-        
+        ttk.Checkbutton(asdu_frame1, text="Флаг Simulation/Test", variable=self.params["simulation"]).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=10)
+
+        # Коэффициенты Stream 1
+        ttk.Label(self.stream1_frame, text="Коэффициенты трансформации:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(10, 10))
+
+        coef_frame1 = ttk.Frame(self.stream1_frame)
+        coef_frame1.pack(fill=tk.X)
+
         coef_list = [
             ("Ктт (ток)", "ktt", "1000"),
             ("Ктн (напр)", "ktn", "1100"),
             ("K3i0 (нейтр ток)", "k3i0", "1000"),
             ("K3u0 (нейтр напр)", "k3u0", "1905.2"),
         ]
-        
+
         for i, (label, key, default) in enumerate(coef_list):
             col = i % 2
             row = i // 2
-            ttk.Label(coef_frame, text=label + ":").grid(row=row, column=col*2, sticky=tk.W, padx=(0, 10), pady=5)
-            self.params[key] = ttk.Entry(coef_frame, width=20)
+            ttk.Label(coef_frame1, text=label + ":").grid(row=row, column=col*2, sticky=tk.W, padx=(0, 10), pady=5)
+            self.params[key] = ttk.Entry(coef_frame1, width=20)
             self.params[key].insert(0, default)
             self.params[key].grid(row=row, column=col*2+1, sticky=tk.W, padx=(0, 20), pady=5)
+
+        # ===== STREAM 2 (скрыт по умолчанию) =====
+        self.stream2_frame = ttk.LabelFrame(scrollable_frame, text="Stream 2 - Параметры", padding="15")
+        self.stream2_frame.pack(fill=tk.X, pady=(0, 20), padx=5)
+        self.stream2_frame.pack_forget()  # Скрываем до включения режима двух потоков
+
+        # Сетевые параметры Stream 2
+        ttk.Label(self.stream2_frame, text="Сетевые параметры:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 10))
+
+        net_frame2 = ttk.Frame(self.stream2_frame)
+        net_frame2.pack(fill=tk.X, pady=(0, 15))
+
+        self.params2 = {}
+
+        for i, (label, key, default) in enumerate(params_list):
+            ttk.Label(net_frame2, text=label + ":").grid(row=i, column=0, sticky=tk.W, padx=(0, 10), pady=5)
+            self.params2[key] = ttk.Entry(net_frame2, width=30)
+            self.params2[key].insert(0, default)
+            self.params2[key].grid(row=i, column=1, sticky=tk.W, padx=(0, 20), pady=5)
+
+        # ASDU параметры Stream 2
+        ttk.Label(self.stream2_frame, text="ASDU параметры:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(10, 10))
+
+        asdu_frame2 = ttk.Frame(self.stream2_frame)
+        asdu_frame2.pack(fill=tk.X, pady=(0, 15))
+
+        for i, (label, key, default) in enumerate(asdu_params):
+            if key == "svid":
+                default = "RET61850_SV2"
+            ttk.Label(asdu_frame2, text=label + ":").grid(row=i, column=0, sticky=tk.W, padx=(0, 10), pady=5)
+            self.params2[key] = ttk.Entry(asdu_frame2, width=30)
+            self.params2[key].insert(0, default)
+            self.params2[key].grid(row=i, column=1, sticky=tk.W, padx=(0, 20), pady=5)
+
+        # Флаг Simulation Stream 2
+        self.params2["simulation"] = tk.BooleanVar(value=True)
+        ttk.Checkbutton(asdu_frame2, text="Флаг Simulation/Test", variable=self.params2["simulation"]).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=10)
+
+        # Коэффициенты Stream 2
+        ttk.Label(self.stream2_frame, text="Коэффициенты трансформации:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(10, 10))
+
+        coef_frame2 = ttk.Frame(self.stream2_frame)
+        coef_frame2.pack(fill=tk.X, pady=(0, 15))
+
+        for i, (label, key, default) in enumerate(coef_list):
+            col = i % 2
+            row = i // 2
+            ttk.Label(coef_frame2, text=label + ":").grid(row=row, column=col*2, sticky=tk.W, padx=(0, 10), pady=5)
+            self.params2[key] = ttk.Entry(coef_frame2, width=20)
+            self.params2[key].insert(0, default)
+            self.params2[key].grid(row=row, column=col*2+1, sticky=tk.W, padx=(0, 20), pady=5)
+
+        # Кнопки для Stream 2
+        buttons_frame2 = ttk.Frame(self.stream2_frame)
+        buttons_frame2.pack(fill=tk.X, pady=(10, 0))
+
+        ttk.Button(buttons_frame2, text="🔧 Автоматически заполнить", command=self.auto_fill_stream2_params).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(buttons_frame2, text="📋 Копировать коэффициенты", command=self.copy_coefficients_to_stream2).pack(side=tk.LEFT)
+
+    def on_dual_stream_toggled(self):
+        """Включение/отключение режима двух потоков"""
+        if self.dual_stream_mode.get():
+            # Включаем режим двух потоков
+            self.stream2_frame.pack(fill=tk.X, pady=(0, 20), padx=5, after=self.stream1_frame)
+            self.stream_selector_frame.pack(fill=tk.X, pady=(0, 10))
+            # Автоматически заполняем параметры Stream 2
+            self.auto_fill_stream2_params()
+        else:
+            # Отключаем режим двух потоков
+            self.stream2_frame.pack_forget()
+            self.stream_selector_frame.pack_forget()
+            self.stream_var.set("stream1")
         
     def create_convert_tab(self, parent):
         """Вкладка конвертации"""
@@ -320,19 +482,25 @@ class SVConverterGUI:
     
     def update_mapping_table(self):
         """Обновляет таблицу сопоставления"""
+        # Выбираем активный mapping в зависимости от режима
+        if self.dual_stream_mode.get() and self.stream_var.get() == "stream2":
+            active_mapping = self.mapping2
+        else:
+            active_mapping = self.mapping
+
         # Очищаем таблицу
         for item in self.mapping_tree.get_children():
             self.mapping_tree.delete(item)
-        
+
         # Добавляем строки
         for role in ROLE_ORDER:
-            ch_idx = self.mapping.get(role)
+            ch_idx = active_mapping.get(role)
             if ch_idx is not None and ch_idx < len(self.channels):
                 ch = self.channels[ch_idx]
                 channel_str = f"{ch_idx}: {ch['name']} ({ch['unit']})"
             else:
                 channel_str = "-- не выбран --"
-            
+
             role_type = "Ток (А)" if ROLE_IS_CURRENT[role] else "Напряжение (В)"
             self.mapping_tree.insert('', 'end', values=(role, channel_str, role_type))
     
@@ -341,8 +509,13 @@ class SVConverterGUI:
         if not self.channels:
             messagebox.showwarning("Предупреждение", "Сначала загрузите CFG файл")
             return
-        
-        self.mapping = guess_mapping(self.channels)
+
+        # Выбираем активный mapping в зависимости от режима
+        if self.dual_stream_mode.get() and self.stream_var.get() == "stream2":
+            self.mapping2 = guess_mapping(self.channels)
+        else:
+            self.mapping = guess_mapping(self.channels)
+
         self.update_mapping_table()
         messagebox.showinfo("Успех", "Каналы автоматически сопоставлены")
     
@@ -352,30 +525,36 @@ class SVConverterGUI:
         if not selection:
             messagebox.showwarning("Предупреждение", "Выберите параметр в таблице")
             return
-        
+
         item = selection[0]
         role = self.mapping_tree.item(item)['values'][0]
-        
+
+        # Выбираем активный mapping в зависимости от режима
+        if self.dual_stream_mode.get() and self.stream_var.get() == "stream2":
+            active_mapping = self.mapping2
+        else:
+            active_mapping = self.mapping
+
         # Создаем диалоговое окно выбора
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Выберите канал для {role}")
         dialog.geometry("400x300")
-        
+
         ttk.Label(dialog, text=f"Выберите канал для параметра '{role}':", font=("Arial", 11, "bold")).pack(padx=10, pady=10)
-        
+
         listbox = tk.Listbox(dialog, height=10)
         listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
+
         for i, ch in enumerate(self.channels):
             listbox.insert(tk.END, f"{i}: {ch['name']} ({ch['unit']}) - {ch['phase']}")
-        
+
         def select_channel():
             selection = listbox.curselection()
             if selection:
-                self.mapping[role] = selection[0]
+                active_mapping[role] = selection[0]
                 self.update_mapping_table()
                 dialog.destroy()
-        
+
         ttk.Button(dialog, text="Выбрать", command=select_channel).pack(pady=10)
     
     def start_convert(self):
@@ -383,12 +562,19 @@ class SVConverterGUI:
         if not self.cfg_file or not self.dat_file:
             messagebox.showerror("Ошибка", "Загрузите оба файла (.cfg и .dat)")
             return
-        
+
+        # Проверяем основной mapping
         if None in self.mapping.values():
-            messagebox.showerror("Ошибка", "Все каналы должны быть сопоставлены")
+            messagebox.showerror("Ошибка", "Все каналы Stream 1 должны быть сопоставлены")
             return
-        
-        # Проверяем параметры
+
+        # Если включен режим двух потоков, проверяем второй mapping
+        if self.dual_stream_mode.get():
+            if None in self.mapping2.values():
+                messagebox.showerror("Ошибка", "Все каналы Stream 2 должны быть сопоставлены")
+                return
+
+        # Проверяем параметры Stream 1
         try:
             params = {}
             params['mac'] = self.params['mac'].get()
@@ -403,15 +589,35 @@ class SVConverterGUI:
             params['k3i0'] = float(self.params['k3i0'].get())
             params['k3u0'] = float(self.params['k3u0'].get())
         except ValueError as e:
-            messagebox.showerror("Ошибка", f"Ошибка в параметрах:\n{str(e)}")
+            messagebox.showerror("Ошибка", f"Ошибка в параметрах Stream 1:\n{str(e)}")
             return
-        
+
+        # Проверяем параметры Stream 2 (если включен режим двух потоков)
+        params2 = None
+        if self.dual_stream_mode.get():
+            try:
+                params2 = {}
+                params2['mac'] = self.params2['mac'].get()
+                params2['appid'] = self.params2['appid'].get()
+                params2['vlanid'] = self.params2['vlanid'].get()
+                params2['vlan_pcp'] = int(self.params2['vlan_pcp'].get())
+                params2['svid'] = self.params2['svid'].get()
+                params2['confrev'] = int(self.params2['confrev'].get())
+                params2['simulation'] = self.params2['simulation'].get()
+                params2['ktt'] = float(self.params2['ktt'].get())
+                params2['ktn'] = float(self.params2['ktn'].get())
+                params2['k3i0'] = float(self.params2['k3i0'].get())
+                params2['k3u0'] = float(self.params2['k3u0'].get())
+            except ValueError as e:
+                messagebox.showerror("Ошибка", f"Ошибка в параметрах Stream 2:\n{str(e)}")
+                return
+
         # Запускаем в отдельном потоке
         self.convert_btn.config(state=tk.DISABLED)
-        thread = threading.Thread(target=self.do_convert, args=(params,), daemon=True)
+        thread = threading.Thread(target=self.do_convert, args=(params, params2), daemon=True)
         thread.start()
     
-    def do_convert(self, params):
+    def do_convert(self, params, params2=None):
         """Выполняет конвертацию"""
         try:
             self.progress_label.config(text="Загрузка файлов...", foreground="blue")
@@ -428,7 +634,12 @@ class SVConverterGUI:
             self.progress['value'] = 50
             self.root.update()
 
-            pcap_bytes, n_frames = convert(cfg_text, dat_text, self.mapping, params)
+            # Вызываем convert с поддержкой двух потоков
+            if params2 is not None:
+                pcap_bytes, n_frames = convert(cfg_text, dat_text, self.mapping, params,
+                                               self.mapping2, params2)
+            else:
+                pcap_bytes, n_frames = convert(cfg_text, dat_text, self.mapping, params)
 
             self.progress_label.config(text=f"✓ Успешно! {n_frames} кадров", foreground="green")
             self.progress['value'] = 100
@@ -441,28 +652,46 @@ class SVConverterGUI:
             self.parse_samples_from_dat(cfg_text, dat_text, params)
 
             # Показываем информацию
-            info = f"Параметры SV потока:\n"
-            info += f"  MAC: {params['mac']}\n"
-            info += f"  APPID: 0x{params['appid']}\n"
-            info += f"  VLANID: {params['vlanid']}\n"
-            info += f"  svID: {params['svid']}\n"
-            info += f"  confRev: {params['confrev']}\n"
-            info += f"  Simulation: {'Да' if params['simulation'] else 'Нет'}\n"
-            info += f"\nКоэффициенты:\n"
-            info += f"  Ктт: {params['ktt']}\n"
-            info += f"  Ктн: {params['ktn']}\n"
-            info += f"  K3i0: {params['k3i0']}\n"
-            info += f"  K3u0: {params['k3u0']}\n"
-            info += f"\nРезультат:\n"
-            info += f"  Кадров: {n_frames}\n"
-            info += f"  Размер PCAP: {len(pcap_bytes) / 1024:.1f} KB\n"
+            if params2 is not None:
+                info = f"Конфигурация: DUAL STREAM MODE\n\n"
+                info += f"═════ Stream 1 ═════\n"
+                info += f"  MAC: {params['mac']}\n"
+                info += f"  APPID: 0x{params['appid']}\n"
+                info += f"  VLANID: {params['vlanid']}\n"
+                info += f"  svID: {params['svid']}\n"
+                info += f"  Ктт: {params['ktt']}, Ктн: {params['ktn']}\n"
+                info += f"\n═════ Stream 2 ═════\n"
+                info += f"  MAC: {params2['mac']}\n"
+                info += f"  APPID: 0x{params2['appid']}\n"
+                info += f"  VLANID: {params2['vlanid']}\n"
+                info += f"  svID: {params2['svid']}\n"
+                info += f"  Ктт: {params2['ktt']}, Ктн: {params2['ktn']}\n"
+                info += f"\n═════ Результат ═════\n"
+                info += f"  Кадров: {n_frames} (каждый сэмпл = 2 фрейма)\n"
+                info += f"  Размер PCAP: {len(pcap_bytes) / 1024:.1f} KB\n"
+            else:
+                info = f"Параметры SV потока:\n"
+                info += f"  MAC: {params['mac']}\n"
+                info += f"  APPID: 0x{params['appid']}\n"
+                info += f"  VLANID: {params['vlanid']}\n"
+                info += f"  svID: {params['svid']}\n"
+                info += f"  confRev: {params['confrev']}\n"
+                info += f"  Simulation: {'Да' if params['simulation'] else 'Нет'}\n"
+                info += f"\nКоэффициенты:\n"
+                info += f"  Ктт: {params['ktt']}\n"
+                info += f"  Ктн: {params['ktn']}\n"
+                info += f"  K3i0: {params['k3i0']}\n"
+                info += f"  K3u0: {params['k3u0']}\n"
+                info += f"\nРезультат:\n"
+                info += f"  Кадров: {n_frames}\n"
+                info += f"  Размер PCAP: {len(pcap_bytes) / 1024:.1f} KB\n"
 
             self.info_text.config(state=tk.NORMAL)
             self.info_text.delete(1.0, tk.END)
             self.info_text.insert(1.0, info)
             self.info_text.config(state=tk.DISABLED)
 
-            messagebox.showinfo("Успех", f"Конвертация завершена!\n\n{n_frames} кадров SV потока\n{len(pcap_bytes) / 1024:.1f} KB")
+            messagebox.showinfo("Успех", f"Конвертация завершена!\n\n{n_frames} кадров\n{len(pcap_bytes) / 1024:.1f} KB")
 
         except Exception as e:
             messagebox.showerror("Ошибка", f"Ошибка при конвертации:\n{str(e)}")
@@ -530,8 +759,8 @@ class SVConverterGUI:
                     values = []
 
                     for row in rows:
-                        if ch_idx + 1 < len(row):  # +1 потому что первое значение - номер сэмпла
-                            raw_val = row[ch_idx + 1]
+                        if ch_idx < len(row):
+                            raw_val = row[ch_idx]
                             # Применяем масштабирование из CFG
                             real_val = raw_val * ch['mult'] + ch['offset']
 
@@ -553,51 +782,114 @@ class SVConverterGUI:
 
         except Exception as e:
             print(f"[ERROR] Ошибка при парсинге данных: {e}")
+            import traceback
+            traceback.print_exc()
             self.parsed_samples = None
 
     def create_view_tab(self, parent):
-        """Вкладка просмотра данных (5-я вкладка)"""
+        """Вкладка просмотра данных (5-я вкладка) - интерфейс как сетевой анализатор"""
 
         if not MATPLOTLIB_AVAILABLE:
             ttk.Label(parent, text="⚠ Для просмотра данных требуется установить matplotlib:\npip install matplotlib numpy",
                      font=("Arial", 12), foreground="red").pack(pady=50)
             return
 
-        mainframe = ttk.Frame(parent, padding="10")
+        mainframe = ttk.Frame(parent)
         mainframe.pack(fill=tk.BOTH, expand=True)
 
-        # Заголовок
-        ttk.Label(mainframe, text="Просмотр данных осциллограммы", font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        # ===== ЛЕВАЯ ПАНЕЛЬ - Список потоков =====
+        left_panel = ttk.Frame(mainframe, width=300)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, padx=5, pady=5)
+        left_panel.pack_propagate(False)
 
-        # Панель управления
-        control_frame = ttk.Frame(mainframe)
-        control_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(left_panel, text="Список потоков", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 10))
 
-        ttk.Label(control_frame, text="Тип графика:").pack(side=tk.LEFT, padx=(0, 5))
+        # Listbox для потоков
+        self.streams_listbox = tk.Listbox(left_panel, height=10, width=35)
+        self.streams_listbox.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.streams_listbox.bind('<<ListboxSelect>>', self.on_stream_selected)
+
+        # Режимы просмотра
+        ttk.Label(left_panel, text="Режим просмотра", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(10, 5))
 
         self.view_mode = tk.StringVar(value="oscillogram")
         view_modes = [
-            ("Осциллограммы", "oscillogram"),
+            ("Осциллограмма", "oscillogram"),
             ("Векторная диаграмма", "phasor"),
             ("Частота", "frequency"),
             ("Таблица значений", "table"),
         ]
 
         for text, mode in view_modes:
-            ttk.Radiobutton(control_frame, text=text, variable=self.view_mode, value=mode,
-                           command=self.update_view_tab).pack(side=tk.LEFT, padx=5)
+            ttk.Radiobutton(left_panel, text=text, variable=self.view_mode, value=mode,
+                           command=self.on_view_mode_changed).pack(anchor=tk.W, padx=10)
 
-        ttk.Button(control_frame, text="🔄 Обновить", command=self.update_view_tab).pack(side=tk.LEFT, padx=(20, 0))
+        # Кнопки управления
+        btn_frame = ttk.Frame(left_panel)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(btn_frame, text="🔄 Обновить", command=self.update_view_tab).pack(fill=tk.X, pady=5)
 
-        # Контейнер для графиков/таблиц
-        self.view_container = ttk.Frame(mainframe)
-        self.view_container.pack(fill=tk.BOTH, expand=True)
+        # ===== ЦЕНТРАЛЬНАЯ/ПРАВАЯ ЧАСТЬ =====
+        right_panel = ttk.Frame(mainframe)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Верхняя часть - Информация о потоке и значения
+        top_frame = ttk.Frame(right_panel)
+        top_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Левая часть верхней панели - описание
+        info_frame = ttk.LabelFrame(top_frame, text="Информация о потоке", padding="10")
+        info_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+
+        self.info_label = ttk.Label(info_frame, text="Выберите поток для просмотра", font=("Arial", 9))
+        self.info_label.pack(anchor=tk.W)
+
+        # Правая часть верхней панели - таблица значений и диаграмма
+        values_frame = ttk.Frame(top_frame)
+        values_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        # Таблица аналоговых значений
+        table_frame = ttk.LabelFrame(values_frame, text="Аналоговые значения", padding="10")
+        table_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+
+        columns = ("Параметр", "Значение", "Единица")
+        self.values_tree = ttk.Treeview(table_frame, columns=columns, height=8, show="headings")
+        self.values_tree.column("Параметр", width=80)
+        self.values_tree.column("Значение", width=80)
+        self.values_tree.column("Единица", width=60)
+        self.values_tree.heading("Параметр", text="Параметр")
+        self.values_tree.heading("Значение", text="Значение")
+        self.values_tree.heading("Единица", text="Единица")
+        self.values_tree.pack(fill=tk.BOTH, expand=True)
+
+        # Диаграмма (пока пустой фрейм)
+        diagram_frame = ttk.LabelFrame(values_frame, text="Диаграмма", padding="5")
+        diagram_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        self.diagram_canvas_frame = diagram_frame
+
+        # Нижняя часть - Осциллограмма
+        bottom_frame = ttk.LabelFrame(right_panel, text="Осциллограмма", padding="5")
+        bottom_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.oscillogram_frame = ttk.Frame(bottom_frame)
+        self.oscillogram_frame.pack(fill=tk.BOTH, expand=True)
 
         # Начальное сообщение
-        self.view_placeholder = ttk.Label(self.view_container,
+        self.view_placeholder = ttk.Label(self.oscillogram_frame,
                                           text="Выполните конвертацию, чтобы просмотреть данные",
                                           font=("Arial", 11), foreground="gray")
         self.view_placeholder.pack(expand=True)
+
+    def on_stream_selected(self, event):
+        """Обработчик выбора потока из списка"""
+        selection = self.streams_listbox.curselection()
+        if selection:
+            self.selected_stream_idx = selection[0]
+            self.update_view_tab()
+
+    def on_view_mode_changed(self):
+        """Обработчик переключения режима просмотра"""
+        self.update_view_tab()
 
     def update_view_tab(self):
         """Обновляет содержимое вкладки просмотра"""
@@ -605,17 +897,41 @@ class SVConverterGUI:
         if not MATPLOTLIB_AVAILABLE:
             return
 
-        # Очищаем контейнер
-        for widget in self.view_container.winfo_children():
-            widget.destroy()
-
         if not self.parsed_samples:
-            self.view_placeholder = ttk.Label(self.view_container,
+            # Очищаем осциллограмму
+            for widget in self.oscillogram_frame.winfo_children():
+                widget.destroy()
+
+            self.view_placeholder = ttk.Label(self.oscillogram_frame,
                                               text="Нет данных для отображения. Выполните конвертацию.",
                                               font=("Arial", 11), foreground="gray")
             self.view_placeholder.pack(expand=True)
             return
 
+        # Обновляем список потоков
+        self.streams_listbox.delete(0, tk.END)
+
+        # Если режим двух потоков, показываем оба потока
+        if self.dual_stream_mode.get():
+            self.streams_listbox.insert(tk.END, "SV Stream 1")
+            self.streams_listbox.insert(tk.END, "SV Stream 2")
+        else:
+            self.streams_listbox.insert(tk.END, "SV Stream 1")
+
+        # Выбираем первый поток по умолчанию
+        if not hasattr(self, 'selected_stream_idx'):
+            self.selected_stream_idx = 0
+        self.streams_listbox.selection_set(min(self.selected_stream_idx, self.streams_listbox.size() - 1))
+
+        # Обновляем информацию о выбранном потоке
+        stream_name = self.streams_listbox.get(self.selected_stream_idx)
+        self.update_stream_info(stream_name)
+
+        # Очищаем осциллограмму
+        for widget in self.oscillogram_frame.winfo_children():
+            widget.destroy()
+
+        # Показываем нужный режим просмотра
         mode = self.view_mode.get()
 
         if mode == "oscillogram":
@@ -627,47 +943,75 @@ class SVConverterGUI:
         elif mode == "table":
             self.show_data_table()
 
+    def update_stream_info(self, stream_name):
+        """Обновляет информацию о потоке и таблицу значений"""
+
+        # Определяем индекс потока
+        stream_idx = 0 if "Stream 1" in stream_name else 1
+
+        # Информация о потоке
+        if stream_idx == 0:
+            params = self.params
+            mac = params['mac'].get()
+            appid = params['appid'].get()
+            svid = params['svid'].get()
+        else:
+            params = self.params2
+            mac = params['mac'].get()
+            appid = params['appid'].get()
+            svid = params['svid'].get()
+
+        info_text = f"SVID: {svid}\nСтандарт: IEC 61850-9-2 LE\n"
+        info_text += f"MAC: {mac}\nAPPID: 0x{appid}\n"
+        info_text += f"Сэмплов: {len(self.parsed_samples.get('Ia', []))}\n"
+        info_text += f"Частота: {self.parsed_samples.get('sample_rate', 4000)} Гц"
+
+        self.info_label.config(text=info_text)
+
+        # Таблица аналоговых значений (первый сэмпл)
+        for item in self.values_tree.get_children():
+            self.values_tree.delete(item)
+
+        # Получаем первый сэмпл для каждого канала
+        for role in ROLE_ORDER:
+            if role in self.parsed_samples and len(self.parsed_samples[role]) > 0:
+                value = self.parsed_samples[role][0]
+                unit = "А" if ROLE_IS_CURRENT[role] else "В"
+                self.values_tree.insert('', 'end', values=(role, f"{value:.2f}", unit))
+
     def show_oscillogram(self):
         """Отображает осциллограммы токов и напряжений"""
 
-        fig = Figure(figsize=(12, 8), dpi=100)
+        fig = Figure(figsize=(12, 3), dpi=100)
 
-        # Верхний график - токи
-        ax1 = fig.add_subplot(211)
+        # Один график со всеми каналами
+        ax = fig.add_subplot(111)
         time = self.parsed_samples['time']
 
-        for role in ['Ia', 'Ib', 'Ic', 'In']:
+        colors = {'Ia': 'red', 'Ib': 'green', 'Ic': 'blue', 'In': 'orange',
+                  'Ua': 'darkred', 'Ub': 'darkgreen', 'Uc': 'darkblue', 'Un': 'darkorange'}
+        linestyles = {role: '-' if ROLE_IS_CURRENT[role] else '--' for role in ROLE_ORDER}
+
+        for role in ROLE_ORDER:
             if role in self.parsed_samples:
-                ax1.plot(time, self.parsed_samples[role], label=role, linewidth=1.5)
+                ax.plot(time, self.parsed_samples[role], label=f"{role} (мВ/мА)",
+                       color=colors.get(role, 'black'), linestyle=linestyles.get(role, '-'), linewidth=1)
 
-        ax1.set_xlabel('Время (с)')
-        ax1.set_ylabel('Ток (А)')
-        ax1.set_title('Токи')
-        ax1.legend(loc='upper right')
-        ax1.grid(True, alpha=0.3)
-
-        # Нижний график - напряжения
-        ax2 = fig.add_subplot(212)
-
-        for role in ['Ua', 'Ub', 'Uc', 'Un']:
-            if role in self.parsed_samples:
-                ax2.plot(time, self.parsed_samples[role], label=role, linewidth=1.5)
-
-        ax2.set_xlabel('Время (с)')
-        ax2.set_ylabel('Напряжение (В)')
-        ax2.set_title('Напряжения')
-        ax2.legend(loc='upper right')
-        ax2.grid(True, alpha=0.3)
+        ax.set_xlabel('Время (с)')
+        ax.set_ylabel('Значение')
+        ax.set_title('Осциллограмма')
+        ax.legend(loc='upper right', fontsize=8, ncol=4)
+        ax.grid(True, alpha=0.3)
 
         fig.tight_layout()
 
         # Встраиваем график
-        canvas = FigureCanvasTkAgg(fig, master=self.view_container)
+        canvas = FigureCanvasTkAgg(fig, master=self.oscillogram_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
         # Добавляем панель инструментов для зума
-        toolbar = NavigationToolbar2Tk(canvas, self.view_container)
+        toolbar = NavigationToolbar2Tk(canvas, self.oscillogram_frame)
         toolbar.update()
 
     def show_phasor_diagram(self):
@@ -728,7 +1072,7 @@ class SVConverterGUI:
 
         fig.tight_layout()
 
-        canvas = FigureCanvasTkAgg(fig, master=self.view_container)
+        canvas = FigureCanvasTkAgg(fig, master=self.oscillogram_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -740,7 +1084,7 @@ class SVConverterGUI:
 
         # Вычисляем частоту по нулевым переходам (для Ua)
         if 'Ua' not in self.parsed_samples:
-            ttk.Label(self.view_container, text="Нет данных напряжения для расчета частоты",
+            ttk.Label(self.oscillogram_frame, text="Нет данных напряжения для расчета частоты",
                      font=("Arial", 11), foreground="red").pack(expand=True)
             return
 
@@ -782,18 +1126,18 @@ class SVConverterGUI:
 
         fig.tight_layout()
 
-        canvas = FigureCanvasTkAgg(fig, master=self.view_container)
+        canvas = FigureCanvasTkAgg(fig, master=self.oscillogram_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        toolbar = NavigationToolbar2Tk(canvas, self.view_container)
+        toolbar = NavigationToolbar2Tk(canvas, self.oscillogram_frame)
         toolbar.update()
 
     def show_data_table(self):
         """Отображает таблицу значений"""
 
         # Создаем таблицу с прокруткой
-        table_frame = ttk.Frame(self.view_container)
+        table_frame = ttk.Frame(self.oscillogram_frame)
         table_frame.pack(fill=tk.BOTH, expand=True)
 
         # Скроллбары
@@ -835,7 +1179,7 @@ class SVConverterGUI:
         table_frame.grid_columnconfigure(0, weight=1)
 
         # Статистика
-        stats_frame = ttk.Frame(self.view_container)
+        stats_frame = ttk.Frame(self.oscillogram_frame)
         stats_frame.pack(fill=tk.X, pady=10)
 
         stats_text = f"Всего сэмплов: {len(time)} | Частота дискретизации: {self.parsed_samples['sample_rate']} Гц | "
