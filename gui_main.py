@@ -547,6 +547,9 @@ class SVConverterGUI:
             return
         self.mapping2 = guess_mapping(self.channels2)
 
+    def open_viewer(self):
+        self.notebook.select(2)
+
 
 if __name__ == "__main__":
     root = tk.Tk()
