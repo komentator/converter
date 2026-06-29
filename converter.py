@@ -223,16 +223,16 @@ def build_sample_bytes(values_by_role, ktt, ktn, k3i0, k3u0):
             # Масштабирование для SV потока
             if ROLE_IS_CURRENT[role]:
                 # Токи: A → мА (×1000)
-                ival = int(round(primary * SCALE_CURRENT))
+                scaled = primary * SCALE_CURRENT
             else:
                 # Напряжения: V → сантивольты (×100)
-                ival = int(round(primary * SCALE_VOLTAGE))
-            
-            # Ограничиваем диапазон int32 (-2^31 до 2^31-1)
-            if ival > 2147483647:
-                ival = 2147483647
-            elif ival < -2147483648:
-                ival = -2147483648
+                scaled = primary * SCALE_VOLTAGE
+
+            # Проверяем диапазон перед округлением
+            if scaled > 2147483647.0 or scaled < -2147483648.0:
+                scaled = max(-2147483648.0, min(2147483647.0, scaled))
+
+            ival = int(round(scaled))
             
             # Кодируем как signed int32 big-endian
             out += struct.pack('>i', ival)
@@ -251,7 +251,10 @@ def build_sample_bytes(values_by_role, ktt, ktn, k3i0, k3u0):
 
 
 def build_asdu(svid, smp_cnt, conf_rev, sample_bytes, smp_synch=0):
-    svid_b = svid.encode('ascii', errors='replace')
+    try:
+        svid_b = svid.encode('ascii')
+    except UnicodeEncodeError:
+        raise ValueError(f'SVID содержит недопустимые символы (только ASCII): {svid}')
     f_svid = tlv(0x80, svid_b)
     f_smpcnt = tlv(0x82, struct.pack('>H', smp_cnt & 0xFFFF))
     f_confrev = tlv(0x83, struct.pack('>I', conf_rev & 0xFFFFFFFF))
@@ -273,7 +276,10 @@ def mac_to_bytes(mac_str):
     parts = re.split(r'[:\-]', mac_str.strip())
     if len(parts) != 6:
         raise ValueError(f'Некорректный MAC-адрес: {mac_str}')
-    return bytes(int(p, 16) for p in parts)
+    try:
+        return bytes(int(p, 16) for p in parts)
+    except ValueError:
+        raise ValueError(f'Некорректный MAC-адрес (неверные hex символы): {mac_str}')
 
 
 def build_frame(dst_mac, src_mac, appid, vlan_id, vlan_pcp, simulation, savpdu):
@@ -390,6 +396,8 @@ def convert(cfg_text, dat_text, mapping, params):
             ch_idx = mapping[role]
             if ch_idx is None:
                 raise ValueError(f"Канал для {role} не определён!")
+            if ch_idx >= len(row):
+                raise ValueError(f"Индекс канала {ch_idx} выходит за границы (строка имеет {len(row)} полей)")
             ch = channels[ch_idx]
             raw = row[ch_idx]
             # Применяем множитель и смещение из конфига
@@ -493,6 +501,8 @@ def _create_frames(rows, channels, mapping, params, sample_rate):
             ch_idx = mapping[role]
             if ch_idx is None:
                 raise ValueError(f"Канал для {role} не определён!")
+            if ch_idx >= len(row):
+                raise ValueError(f"Индекс канала {ch_idx} выходит за границы (строка имеет {len(row)} полей)")
             ch = channels[ch_idx]
             raw = row[ch_idx]
             secondary = float(raw) * float(ch.get('mult', 1.0)) + float(ch.get('offset', 0.0))

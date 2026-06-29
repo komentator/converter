@@ -295,9 +295,12 @@ class SVConverterGUI:
         for role in ['Ua', 'Ub', 'Uc', 'Un']:
             if role in rms_values:
                 info += f"  {role}: {rms_values[role]:.2f} V\n"
-        
+
         info += f"\nЧастота: 50 Гц\n"
-        info += f"Отсчетов: {len(self.analyzer.values['Ia'])}\n"
+        if self.analyzer and 'Ia' in self.analyzer.values:
+            info += f"Отсчетов: {len(self.analyzer.values['Ia'])}\n"
+        else:
+            info += "Отсчетов: нет данных\n"
         
         self.params_text.config(state=tk.NORMAL)
         self.params_text.delete(1.0, tk.END)
@@ -431,18 +434,24 @@ class SVConverterGUI:
             self.progress['value'] = 20
             self.root.update()
 
-            with open(self.cfg_file, 'r', encoding='utf-8') as f:
-                cfg_text = f.read()
+            cfg_text = None
+            dat_text = None
+            cfg_text2 = None
+            dat_text2 = None
 
-            with open(self.dat_file, 'r', encoding='utf-8') as f:
-                dat_text = f.read()
+            try:
+                with open(self.cfg_file, 'r', encoding='utf-8') as f:
+                    cfg_text = f.read()
+                with open(self.dat_file, 'r', encoding='utf-8') as f:
+                    dat_text = f.read()
 
-            if self.dual_mode:
-                with open(self.cfg_file2, 'r', encoding='utf-8') as f:
-                    cfg_text2 = f.read()
-
-                with open(self.dat_file2, 'r', encoding='utf-8') as f:
-                    dat_text2 = f.read()
+                if self.dual_mode:
+                    with open(self.cfg_file2, 'r', encoding='utf-8') as f:
+                        cfg_text2 = f.read()
+                    with open(self.dat_file2, 'r', encoding='utf-8') as f:
+                        dat_text2 = f.read()
+            except IOError as e:
+                raise ValueError(f'Ошибка чтения файлов: {str(e)}')
 
             self.progress_label.config(text="Конвертация...", foreground="blue")
             self.progress['value'] = 50

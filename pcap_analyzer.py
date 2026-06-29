@@ -85,12 +85,16 @@ class PCAPAnalyzer:
 
             # Ищем ASN.1 структуру
             # Ищем тег 0x60 (savPDU)
-            while offset < len(packet_data):
+            found = False
+            while offset < len(packet_data) and not found:
                 if packet_data[offset] == 0x60:
                     # Нашли savPDU
                     self._parse_savpdu(packet_data[offset:], frame_idx)
+                    found = True
                     break
                 offset += 1
+            if not found and offset >= len(packet_data):
+                return
         except (struct.error, IndexError):
             # Игнорируем ошибки парсинга поврежденных пакетов
             pass
