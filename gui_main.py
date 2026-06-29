@@ -117,24 +117,43 @@ class SVConverterGUI:
     def create_mapping_tab(self, parent):
         mainframe = ttk.Frame(parent, padding="20")
         mainframe.pack(fill=tk.BOTH, expand=True)
-        
-        ttk.Label(mainframe, text="Сопоставление каналов:", font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=(0, 20))
-        
+
+        ttk.Label(mainframe, text="Поток 1 - Сопоставление каналов:", font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=(0, 10))
+
         columns = ("Параметр", "Канал", "Тип")
-        self.mapping_tree = ttk.Treeview(mainframe, columns=columns, height=12, show="headings")
+        self.mapping_tree = ttk.Treeview(mainframe, columns=columns, height=10, show="headings")
         self.mapping_tree.column("Параметр", width=150)
         self.mapping_tree.column("Канал", width=400)
         self.mapping_tree.column("Тип", width=200)
-        
+
         for col in columns:
             self.mapping_tree.heading(col, text=col)
-        
-        self.mapping_tree.pack(fill=tk.BOTH, expand=True, pady=(0, 20))
-        
+
+        self.mapping_tree.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
         btn_frame = ttk.Frame(mainframe)
-        btn_frame.pack(fill=tk.X)
+        btn_frame.pack(fill=tk.X, pady=(0, 20))
         ttk.Button(btn_frame, text="🔍 Автоматическое определение", command=self.auto_detect).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(btn_frame, text="✎ Редактировать", command=self.edit_mapping).pack(side=tk.LEFT)
+
+        ttk.Separator(mainframe).pack(fill=tk.X, pady=15)
+
+        ttk.Label(mainframe, text="Поток 2 (опционально) - Сопоставление каналов:", font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=(0, 10))
+
+        self.mapping_tree2 = ttk.Treeview(mainframe, columns=columns, height=10, show="headings")
+        self.mapping_tree2.column("Параметр", width=150)
+        self.mapping_tree2.column("Канал", width=400)
+        self.mapping_tree2.column("Тип", width=200)
+
+        for col in columns:
+            self.mapping_tree2.heading(col, text=col)
+
+        self.mapping_tree2.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        btn_frame2 = ttk.Frame(mainframe)
+        btn_frame2.pack(fill=tk.X)
+        ttk.Button(btn_frame2, text="🔍 Автоматическое определение", command=self.auto_detect2).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(btn_frame2, text="✎ Редактировать", command=self.edit_mapping2).pack(side=tk.LEFT)
     
     def create_params_tab(self, parent):
         mainframe = ttk.Frame(parent, padding="20")
@@ -339,7 +358,7 @@ class SVConverterGUI:
     def update_mapping_table(self):
         for item in self.mapping_tree.get_children():
             self.mapping_tree.delete(item)
-        
+
         for role in ROLE_ORDER:
             ch_idx = self.mapping.get(role)
             if ch_idx is not None and ch_idx < len(self.channels):
@@ -347,9 +366,24 @@ class SVConverterGUI:
                 channel_str = f"{ch_idx}: {ch['name']} ({ch['unit']})"
             else:
                 channel_str = "-- не выбран --"
-            
+
             role_type = "Ток (А)" if ROLE_IS_CURRENT[role] else "Напряжение (В)"
             self.mapping_tree.insert('', 'end', values=(role, channel_str, role_type))
+
+    def update_mapping_table2(self):
+        for item in self.mapping_tree2.get_children():
+            self.mapping_tree2.delete(item)
+
+        for role in ROLE_ORDER:
+            ch_idx = self.mapping2.get(role)
+            if ch_idx is not None and ch_idx < len(self.channels2):
+                ch = self.channels2[ch_idx]
+                channel_str = f"{ch_idx}: {ch['name']} ({ch['unit']})"
+            else:
+                channel_str = "-- не выбран --"
+
+            role_type = "Ток (А)" if ROLE_IS_CURRENT[role] else "Напряжение (В)"
+            self.mapping_tree2.insert('', 'end', values=(role, channel_str, role_type))
     
     def auto_detect(self):
         if not self.channels:
@@ -364,29 +398,59 @@ class SVConverterGUI:
         if not selection:
             messagebox.showwarning("Предупреждение", "Выберите параметр")
             return
-        
+
         item = selection[0]
         role = self.mapping_tree.item(item)['values'][0]
-        
+
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Выберите канал для {role}")
         dialog.geometry("400x300")
-        
+
         ttk.Label(dialog, text=f"Выберите канал для '{role}':", font=("Arial", 11, "bold")).pack(padx=10, pady=10)
-        
+
         listbox = tk.Listbox(dialog, height=10)
         listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
+
         for i, ch in enumerate(self.channels):
             listbox.insert(tk.END, f"{i}: {ch['name']} ({ch['unit']}) - {ch['phase']}")
-        
+
         def select_channel():
             selection = listbox.curselection()
             if selection:
                 self.mapping[role] = selection[0]
                 self.update_mapping_table()
                 dialog.destroy()
-        
+
+        ttk.Button(dialog, text="Выбрать", command=select_channel).pack(pady=10)
+
+    def edit_mapping2(self):
+        selection = self.mapping_tree2.selection()
+        if not selection:
+            messagebox.showwarning("Предупреждение", "Выберите параметр")
+            return
+
+        item = selection[0]
+        role = self.mapping_tree2.item(item)['values'][0]
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Выберите канал для {role} (Поток 2)")
+        dialog.geometry("400x300")
+
+        ttk.Label(dialog, text=f"Выберите канал для '{role}':", font=("Arial", 11, "bold")).pack(padx=10, pady=10)
+
+        listbox = tk.Listbox(dialog, height=10)
+        listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        for i, ch in enumerate(self.channels2):
+            listbox.insert(tk.END, f"{i}: {ch['name']} ({ch['unit']}) - {ch['phase']}")
+
+        def select_channel():
+            selection = listbox.curselection()
+            if selection:
+                self.mapping2[role] = selection[0]
+                self.update_mapping_table2()
+                dialog.destroy()
+
         ttk.Button(dialog, text="Выбрать", command=select_channel).pack(pady=10)
     
     def start_convert(self):
@@ -544,8 +608,11 @@ class SVConverterGUI:
 
     def auto_detect2(self):
         if not self.channels2:
+            messagebox.showwarning("Предупреждение", "Загрузите CFG файл для потока 2")
             return
+
         self.mapping2 = guess_mapping(self.channels2)
+        self.update_mapping_table2()
 
     def open_viewer(self):
         self.notebook.select(2)
